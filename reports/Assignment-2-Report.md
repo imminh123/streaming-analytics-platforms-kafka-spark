@@ -1,336 +1,268 @@
-# Part 1 - Batch data ingestion pipeline
+# Part 1 - Design for streaming analytics
 
-## 1. Sample data file configuration & service agreement
+## 1. Dataset
+As a tenant, we will choose the dataset of [Taxi Trips by City of Chicago (2013-2023)](https://data.cityofchicago.org/Transportation/Taxi-Trips-2013-2023-/wrvz-psew/about_data) as a running scenario. This dataset contains information about taxi trip records from 2013 to 2023 reported to the City of Chicago.
+With 23 attributes for each data point, including trip duration, distance, location of pickup and dropoff, fares, etc, streaming analytics can provide valuable insights for operations, customer preference that ultimately contribute to the decision making process, improving overall service quality. 
 
-### Data File Configuration Schema
-Tenants need to specify in detail what data going into **mysimbdp**. As data will be stored in Cassandra, it's important that the Schema is defined beforehand. We chose Avro in this case as this is a popular standard for defining data type. The rest of parameters put some constrains to the type and size of input data as currently **mysimbdp** hasn't grown to adapt to a variety of file types and a large demand for computing resources.
-| Parameter | Description |
-| --------------- | --------------- |
-|   name  | Descriptive name for the data   |
-| file_type    | Type of data file    |
-| key_space    | Key space of storage (Cassandra)    |
-| csv.first.row.as.header    | Flag to treat first line of CSV file as header    |
-| schema    | Avro schema (schema.name will be use as table name)    |
-| primary_key    | Primary key, following Cassandra documentation    |
-| max_file_size_mb    | Set maximum accepted file size    |
+| Trip ID                        | Taxi ID                                                                                        | Trip Start Timestamp   | Trip End Timestamp     | Trip Seconds | Trip Miles | Pickup Census Tract | Dropoff Census Tract | Pickup Community Area | Dropoff Community Area | Fare  | Tips | Tolls | Extras | Trip Total | Payment Type | Company      | Pickup Centroid Latitude | Pickup Centroid Longitude | Pickup Centroid Location            | Dropoff Centroid Latitude | Dropoff Centroid Longitude | Dropoff Centroid Location           |
+|--------------------------------|------------------------------------------------------------------------------------------------|------------------------|------------------------|--------------|------------|---------------------|----------------------|-----------------------|------------------------|-------|------|-------|--------|------------|--------------|--------------|--------------------------|---------------------------|------------------------------------|---------------------------|----------------------------|------------------------------------|
+| 0002044d | 476c001 | 01/22/2024 01:45:00 PM | 01/22/2024 02:00:00 PM | 841          | 2.2        |                     |                      | 8                     | 28                     | 10.25 | 4.00 | 0.00  | 1.00   | 15.75      | Credit Card  | City Service | 41.899602111             | -87.633308037             | POINT (-87.6333080367 41.899602111) | 41.874005383              | -87.66351755              | POINT (-87.6635175498 41.874005383) |
 
-### Service Agreement Schema
-Here tenants will specify how they want **mysimbdp** to execute **clientbatchingestapp**. For batch processing, client provided program will be executed periodically based on provided **schedule** property, with requested resources.
+Some of the valuable insights can be analyzed from this dataset include:
 
-| Parameter | Description |
-| --------------- | --------------- |
-|   client  | Unique identifier for client   |
-| data_retention_period_days    | Duration for data retention after processing    |
-| schedule    | Schedule to run processing task periodically (Kubernetes's convention)    |
-| resources    | Explicitly specify resources needed to run client's provided task   
+### Streaming Analytics 
+- Total metrics in a window: calculating the total of several metrics (fare, tips, trips total) for a window of time (daily), operators can see the peak hours when demand is high, base on that adjust fleet availability and pricing strategy.
+- Accumulated business metrics so far in a day: calculating accumulated number of trip, fare and average tips, total so far in a day, providing a real-time view of daily business performance.
+- Hot spot for pickup community area: Chicago has 77 communities area, and the information about pickup community area are also provided. This can be used to identify popular areas for pickup, useful for resource allocation.
+- Hot spot for pickup location: using geo-location, we can specify popular places for pickup, increase dispatch efficiency.
 
-### Sample configuration
-### Tenant A
-**Data File Configuration**
+### Batch Analytics 
+- Trends and patterns in fare distribution: based on historical analyzed result on daily fare distribution, company can analyze the overal trends and patterns over different time windows (monthly, quarterly, annualy), and further optimize service performance/quality.
+- Accumulated business metrics: aggregating daily metrics on trip, fare, tips to calculate the accumulated revenue in a wider time window (monthly, annualy). This information can be used to make strategic decisions and adjust operational strategies.
+- Hot spot for pickup community area: based on historical data on popular community area, operator can identify persistent hot spots, and further analyze factors contributing to their popularity (proximity to attraction, population, etc).
+- Hot spot for pickup location: the aggregated historical data can give more accurate data on frequency of pick-ups at each location, combine with study on factors contributing to their popularity to optimize dispatching algorithms, route planning, and resource allocation for drivers.
+
+
+
+## 2. Data Constrains
+### Keyed or Non-keyed Data Streams 
+For our tenant usecase, since the analytic data does not rely on operations that require grouping, aggregating or processing based on any specific attributes, we treat all events EQUALLY. Hence, our streaming analytics platform only deals with **Non-keyed Data Streams**. 
+
+
+### Message Delivery Guarantees
+**Expected throughput**: Base on [previous analysis](https://toddwschneider.com/posts/chicago-taxi-data/) conducted, the number of taxi trips per day in Chicago averages around 50k to 100k during normal day and peaked at 150k on holiday occasions like St. Patrick's Day Parade. With our sample dataset, there are around 55k taxi trip records per day. *With the amount of events, we expected this fall into the comfort zone of our messaging system levering Kafka.*
+
+**The importance of a single message**: One taxi record is packed with useful informatin that directly contributes to the company's decision at the time on pricing, resource allocation and optimization. Hence, an appropriate semantic guarantee should prioritize *durability* and *consistency*.
+
+With these considerations on tenant data, our messaging system should support the Message Delivery Guarantees level of [**Exactly Once** on both producer and consumer (utilize Kafka transactional delivery)](https://docs.confluent.io/kafka/design/delivery-semantics.html). With this, each message is delivered once and only once. Messages are never lost or read twice even if some part of the system fails.
+
+## 3. Time, Windows, Out-of-order, and Watermarks
+### Event Time
+In order to produce useful insights as the tenant has defined, and guarantee the **real-time** characteristic associated with the real world, it is mandatory that our data sources come with **Event Time** for each record. This refers to the time when a taxi trip actually occurred in the real world. Fortunately, the tenant's dataset has already come with 2 timestamp attribute of *Trip Start Timestamp* and *Trip End Timestamp*.
+
+### Windows
+Different operations will handle different types of window on analytic data. 
+1. **Total metrics in a window**: as this operation aims to calculate fare distribution in a fixed non-overlap period of time, a tumbling window of `5 seconds` base on `event_timestamp` is used.
+2. **Accumulated business metrics so far in a day**: No window needed as this operation aims to provide a real-time view into business performance, new results will be added to previous one, thus the task will run as soon as possible.
+3. **Hot spot for pickup community area**: the operation calculate the occurrence of community areas for the past period of time (1 minute), thus using a *sliding* window of `1 minute` for every `30 seconds` base on `event_timestamp`.
+4. **Hot spot for pickup location**: same as the above, this operation calculate the occurrence of popular pickup locations for the past period of time (1 minute), thus using a *sliding* window of `1 minute` for every `30 seconds` base on `event_timestamp`.
+
+### Out-of-order data
+Several reasons that can cause out-of-order data include:
+1. Network delay/latency: our whole platform is designed with distribute components, thus relies on network to communicate. Any network delay can cause data to arrived out-of-order. This can happen at all stages of the pipeline (data source publish/consume, data sink publish/consume).
+2. Processing delay: depend on the factor of parallelism and resources allocated to Kafka (partitions) and Spark (maximum tasks) that one slow task can cause out-of-order for subsequent records.
+3. Out-of-order source: even though in our example, emulated data is guaranteed having ordered event time assigned for each record, in real life scenario, data can be out-of-order from the source.
+
+### Watermarks
+Since several of our operations relies on aggregating data for a specify time window, it's mandatory for Spark application to enforce watermarking to address the issue of out-of-order data and ensure correct results for window-based operations.
+
+## 4. Performance metrics
+Important performance metrics that our tenant need to be aware include metrics collected from the platform' message brokers (Kafka) and the streaming analytic engine (Sparl). Here are some of the important metrics (non-exhaustive list) and how our platform helps tenant in measuring it.
+1. Data Throughput
+2. Resource Utilization
+
+# Part 2 - Implementation of streaming analytics
+The following documentation addresses the implementation of the **tenantstreamapp** - an Spark application developed by client for real-time streaming analytics (structured streaming).
+
+## 1. Data Structures and Schemas
+
+### Schemas
+For both input and output data, schemas defining the data structures and types are strictly enforced, for the following reasons:
+1. The data sink of our platform relies on Cassandra, thus tables need to be created beforehand based on pre-defined schemas.
+2. Our platform uses middleware that need to explicitly define the data structure, like Kafka Connect for Cassandra requires mapping config from Topics to Tables.
+3. Schema provide a standard view to manage and validate schemas used by producers and consumers. With pre-defined schemas, our platform can use [Schema Registry](https://docs.confluent.io/platform/current/schema-registry/index.html#:~:text=Schema%20Registry%20provides%20a%20centralized,and%20compatibility%20as%20schemas%20evolve.) to further enforce them for input data and results.
+
+#### Example
+One of the output data schema is *tripstotal* (sum of several business metrics) need to explicitly define its schema, using **Avro** format.
 ```
 {
-  "name": "speed-tracking-data",
-  "file_type": "csv",
-  "key_space": "mysimbdp_coredms",
-  "csv.first.row.as.header": "true",
-  "schema": {
-    "type": "record",
-    "name": "analytics", 
-    "fields": [
-      { "name": "PROVINCECODE", "type": "string" },
-      { "name": "DEVICEID", "type": "string" },
-      { "name": "IFINDEX", "type": "int" },
-      { "name": "FRAME", "type": "int" },
-      { "name": "SLOT", "type": "int" },
-      { "name": "PORT", "type": "int" },
-      { "name": "ONUINDEX", "type": "int" },
-      { "name": "ONUID", "type": "int" },
-      { "name": "TIME", "type": "string" },
-      { "name": "SPEEDIN", "type": "double" },
-      { "name": "SPEEDOUT", "type": "double" }
-    ]
-  },
-  "primary_key": ["PROVINCECODE", "DEVICEID", "ONUID"],
-  "max_file_size_mb": 50
-}
-```
-
-**Service Agreement**
-```
-{
-  "client": "client_a",
-  "data_retention_period_days": "7",
-  "schedule": "0 * * * *",
-  "resources": {
-    "requests": {
-      "memory": "64Mi",
-      "cpu": "250m"
+    "key_space": "mysimbdp_coredms",
+    "schema": {
+        "name": "tripstotal",
+        "fields": [
+            {"name": "id", "type": "uuid"},
+            {"name": "trips_total", "type": "int"},
+            {"name": "fare_total", "type": "float"},
+            {"name": "tips_avg", "type": "float"},
+            {"name": "trip_total_avg", "type": "float"}
+        ]
     },
-    "limits": {
-      "memory": "128Mi",
-      "cpu": "500m"
-    }
-  }
+    "primary_key": ["id"]
 }
 ```
 
-### Tenant B
+Our input data is about taxi trip records, and the ingested data also need to define the schema in Avro format as below.
 ```
 {
-  "name": "amazon-product-review-data",
-  "file_type": "csv",
-  "key_space": "product_insights",
-  "csv.first.row.as.header": "true",
-  "schema": {
-    "type": "record",
-    "name": "product_reviews",
-    "fields": [
-      {"name": "marketplace", "type": "string"},
-      {"name": "customer_id", "type": "string"},
-      {"name": "review_id", "type": "string"},
-      {"name": "product_id", "type": "string"},
-      {"name": "product_parent", "type": "string"},
-      {"name": "product_title", "type": "string"},
-      {"name": "product_category", "type": "string"},
-      {"name": "star_rating", "type": "int"},
-      {"name": "helpful_votes", "type": "int"},
-      {"name": "total_votes", "type": "int"},
-      {"name": "vine", "type": "string"},
-      {"name": "verified_purchase", "type": "string"},
-      {"name": "review_headline", "type": "string"},
-      {"name": "review_body", "type": "string"},
-      {"name": "review_date", "type": "string", "logicalType": "date"}
-    ]
-  },
-  "primary_key": ["product_id", "review_id", "customer_id"],
-  "max_file_size_mb": 20
-}
-```
-
-**Service Agreement**
-```
-{
-  "client": "client_b",
-  "data_retention_period_days": "3",
-  "schedule": "*/1 * * * *",
-  "resources": {
-    "requests": {
-      "memory": "128Mi",
-      "cpu": "500m"
+    "key_space": "mysimbdp_coredms",
+    "schema": {
+        "name": "ingestData",
+        "fields": [
+            {"name": "trip_id", "type": "string"},
+            {"name": "taxi_id", "type": "string"},
+            {"name": "trip_start_timestamp", "type": "string"},
+            {"name": "trip_end_timestamp", "type": "string"},
+            {"name": "trip_seconds", "type": "int"},
+            {"name": "trip_miles", "type": "float"},
+            {"name": "pickup_census_tract", "type": ["null", "long"]},
+            {"name": "dropoff_census_tract", "type": ["null", "long"]},
+            {"name": "pickup_community_area", "type": ["null", "int"]},
+            {"name": "dropoff_community_area", "type": ["null", "int"]},
+            <!-- continue -->
+        ]
     },
-    "limits": {
-      "memory": "256Mi",
-      "cpu": "1Gi"
-    }
-  }
+    "primary_key": ["taxi_id", "trip_id"]
 }
 ```
 
-## 2. Design of clientbatchingestapp
-  
-![Design of clientbatchingestapp](https://github.com/imminh123/realtime-data-ingestion-kafka-cassandra/blob/main/assets/clientbatchingestapp.png?raw=true)
+### Serialization/deserialization
+According to [Spark documentation on structured streaming](https://spark.apache.org/docs/2.2.2/structured-streaming-kafka-integration.html):
+> key.deserializer: Keys are always deserialized as byte arrays with ByteArrayDeserializer. <br>
+value.deserializer: Values are always deserialized as byte arrays with ByteArrayDeserializer.
 
-**As a tenant, there are 2 main components** </br>
-1. Client ingestes data file into **client-staging-input-directory** using a set of RESTful API provided by **mysimbdp**.
-- **POST: /upload-file/{tenant_id}**: Upload file (Form Data)
-- **GET /tenant/{tenant_id}**: Fetch lists of files in **client-staging-input-directory**
+Thus, for our producer using Kafka, the data also needs to be serialize with a format suitable with Spark's **ByteArrayDeserializer**. For simplicity, we will go with **UTF-8 encoding**, which text data will be represented as a sequence of bytes, or a byte array, making it compatible with **ByteArrayDeserializer**.  
 
-2. **clientbatchingestapp** as a Docker image that can be pulled by **mysimbdp**. There are 2 environment variables (provided by **mysimbdp**) that the program need to care about.
-- CLIENT_ID: The same value as **client** property in Service Agreement, to uniquely identify tenant.
-- SOURCE_PATH: **clientbatchingestapp** will fetch tenant's data from the directory following this format:
-  ```
-  {SOURCE_PATH}/{CLIENT_ID}/in
-  ```
+## 2. Processing Functions
 
-  The processed data (data wrangling) needs to be stored in the directory following this format:
-  ```
-  {SOURCE_PATH}/{CLIENT_ID}/out
-  ```
-  
-In this case, using Pandas, we've perform `data wrangling` by dropping all rows with NULL values from the DataFrame.
+### Total metrics in a window for fare distribution
+#### Logic
+Calculate total amount of:
+1. fare (total_fare)
+2. tips (tips_fare)
+3. trip_total (total_trip_total)
+> The result of this function can be use to plot the fare distribution through out the day. Based on that, operators can see the peak hours when all the fares increase significantly, represented by spikes in the distribution.
 
-## 3. Design of mysimbdp-batchingestmanager
-![Design of mysimbdp-batchingestmanager](https://github.com/imminh123/realtime-data-ingestion-kafka-cassandra/blob/main/assets/batchingestmanager.png?raw=true)
+![Fare distribution](https://global.discourse-cdn.com/grafana/original/3X/8/c/8c987edc27f6505a4434a2a940bd5e63f2b1786a.png)
+#### Configuration
+The function aggregate data from a tumbling window of `5 seconds` base on `event_timestamp`, with watermarking accepts delay up to 10 seconds. The aggregated output will be write into another Kafka topic named `{tenant_app_name}_sumFareWindowStream`. The data in this topic will be written to our Cassandra sink table `sumfarewindow` by a Kafka connect consumer.
 
-**mysimbdp-batchingestmanager** leverages [Kubernetes Cronjob](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/) to schedule **clientbatchingestapp** performing the ingestion for available files in **client-staging-input-directory**. <br>
-
-Based on provided *service agreement configuration file* provided by tenant, a corresponding Kubernetes `cronjob.yaml` will be created for **batchingestmanager**.
-
+#### Code
 ```
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: client-batch-ingestion-cron-1
-spec:
-  schedule: "*/1 * * * *"
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: client-batch-ingestion-cron
-            image: client-batch-ingestion:latest
-            imagePullPolicy: Never
-            env:
-              - name: SOURCE_PATH
-                value: "/data"
-              - name: CLIENT_ID
-                value: "1"
-            volumeMounts:
-              - name: data-volume
-                mountPath: /data
-            resources:
-              requests:
-                memory: "64Mi"
-                cpu: "250m"
-              limits:
-                memory: "128Mi"
-                cpu: "500m"
-                ...........
+# fare distribution
+sum_fare_window = info_df_fin.withWatermark("event_timestamp", "10 seconds").groupBy(
+    window("event_timestamp", "5 seconds")).agg(round(sum("fare"), 2).alias("total_fare"),
+                                                    round(sum("tips"), 2).alias("tips_fare"),
+                                                    round(sum("trip_total"), 2).alias(
+                                                        "total_trip_total")).selectExpr(
+    "to_json(struct(*)) AS value")
+sum_fare_window_stream = return_write_stream(sum_fare_window, "sumFareWindowStream", "update", "sum_fare_window_stream")
 ```
 
-## 4. Multi-tenancy Model 
-
-![Multi-tenancy Model ](https://github.com/imminh123/realtime-data-ingestion-kafka-cassandra/blob/main/assets/ingestion_processor.png?raw=true)
-
-Let's zoom in at the heart of **mysimbdp** platform, the `Ingestion Processor`. 
-
-In order to handle a multi-tenancy model, **batchingestmanager** as a Kubernetes cluster will be shared for all tenants, orchestrating multiple **clientbatchingestapp** instances.
-
-A Kafka Broker will be shared, each **clientbatchingestapp** will use one Topic for data streaming. 
-
-For each tenant, there will be a new Kafka Connect worker. Each worker manages one `Source Connector` (pull data from our staging directory and publish to corresponding Kafka Topic) and one `Sink Connector` (subscribe to Kafka Topic and Ingest data into our **mysimbdp_coredms**).
-
-The **mysimbdp_coredms** cluster which is the platform's data warehouse will be shared, as well as the **client-staging-input-directory** (each tenant will own a sub-directory).
-
-### Implementation
-
-**Performance**: 
-With 1 Kafka node, 4 nodes of Cassandra (replication = 2). Batch size (sink) = 32 and batch size (source) = 2000. Our platform is capable of ingesting over 6000 records per minutes.
-
-**Error**
-Exception happen when schema configuration provided by client does not adhere to data file constrain, with limited processing power, this cause our **coredms** to crashed after a few seconds.
-
-**Violation of constraints**: the data file constrain has specified the pattern for accepted file `"input.file.pattern": ".*\\.csv$"`. Thus any file that does not match this pattern will be ignore without any log.
-
-```
-2024-03-15 12:29:51    statement: INSERT INTO mysimbdp_coredms.analytics(provincecode,deviceid,ifindex,frame,slot,port,onuindex,onuid,time,speedin,speedout) VALUES (:provincecode,:deviceid,:ifindex,:frame,:slot,:port,:onuindex,:onuid,:time,:speedin,:speedout) USING TIMESTAMP :kafka_internal_timestamp} (com.datastax.oss.kafka.sink.CassandraSinkTask)
-2024-03-15 12:29:51 [2024-03-15 10:29:51,878] WARN Error inserting/updating row for Kafka record SinkRecord{kafkaOffset=300156, timestampType=CreateTime, originalTopic=locations, originalKafkaPartition=0, originalKafkaOffset=300156} ConnectRecord{topic='locations', kafkaPartition=0, key=Struct{}, keySchema=Schema{com.github.jcustenborder.kafka.connect.model.Key:STRUCT}, value=Struct{PROVINCECODE=HKD,DEVICEID=2222771642618,IFINDEX=6828878457269,FRAME=1,SLOT=1,PORT=13,ONUINDEX=6,ONUID=222277164261810113006,TIME=01/08/2019 11:38:33,SPEEDIN=541783,SPEEDOUT=29639}, valueSchema=Schema{com.github.jcustenborder.kafka.connect.model.Value:STRUCT}, timestamp=1710453148320, headers=ConnectHeaders(headers=[ConnectHeader(key=file.name, value=ONUData-sample_min_1 23.08.58.csv, schema=Schema{STRING}), ConnectHeader(key=file.name.without.extension, value=ONUData-sample_min_1 23.08.58, schema=Schema{STRING}), ConnectHeader(key=file.path, value=/data/input/ONUData-sample_min_1 23.08.58.csv, schema=Schema{STRING}), ConnectHeader(key=file.parent.dir.name, value=input, schema=Schema{STRING}), ConnectHeader(key=file.length, value=48728, schema=Schema{INT32}), ConnectHeader(key=file.offset, value=6, schema=Schema{INT8}), ConnectHeader(key=file.last.modified, value=Thu Mar 14 21:52:27 UTC 2024, schema=Schema{org.apache.kafka.connect.data.Timestamp:INT64}), ConnectHeader(key=file.relative.path, value=ONUData-sample_min_1 23.08.58.csv, schema=Schema{STRING})])}: All 1 node(s) tried for the query failed (showing first 1 nodes, use getAllErrors() for more): Node(endPoint=cassandra1/192.168.128.6:9042, hostId=93e66b37-98b8-45bc-af26-3773f2b4455e, hashCode=27e50f4f): [com.datastax.oss.driver.api.core.servererrors.UnavailableException: Not enough replicas available for query at consistency LOCAL_ONE (1 required but only 0 alive)]
-```
-
-
-## 5. Logging
-As the platform relies on Kafka Connector, which ultilize `log4j` for log configuration. At the momment, our platform collects log by overwriting configuration of `log4j` with our own `/ingestion/connector/config/connect-log4j.properties`.
-All logs file will be stored under `/ingestion/logs`.
-- `logs/kafka`: Store logs regarding Kafka & Kafka Connect, collect progess of file ingestion, failed, successful operations.
-- `logs/cassandra`: Store all DEBUG logs from Cassandra stdout, failed, succeeded operations.
-
-```
-code/docker-compose.yaml
-
-      - ./ingestion/connector/config/connect-log4j.properties:/etc/kafka/connect-log4j.properties
-      - ./ingestion/logs/kafka:/var/log/kafka
-      - ./ingestion/logs/cassandra:/var/log/cassandra
-```
-
-As the logs are unstructured data, our platform need to have a dedicate logic component, could be another pipeline to pre-process those data before it can be used for any insight.
-
----
-
-# Part 2 - Near real-time data ingestion
-
-## 1. Multi-tenancy Model 
-![Multi-tenancy Model ](https://github.com/imminh123/realtime-data-ingestion-kafka-cassandra/blob/main/assets/clientstreamingestapp.png?raw=true)
-
-All components to support the multi-tenancy model for the near real-time data ingestion capabilities of **mysimpbdp** is the same with our previous system in **Part 1**.
-
-> The core data ingestion processor of **mysimpbdp** rely on shared Kafka broker and dedicated Kafka connect worker for each tenant.
-
-The only difference that support near real-time ingestion is the **streamingestmanager** will handle streaming app in a different way. We'll discuss this in the next question.
-
-## 2. streamingestmanager & clientstreamingestapp
- **clientstreamingestapp** as a Docker image that can be pulled by **mysimbdp**. There are 2 environment variables (provided by **mysimbdp**) that the program need to care about.
-  - CLIENT_ID: The same value as **client** property in Service Agreement, to uniquely identify tenant.
-  - SOURCE_PATH: **clientbatchingestapp** will fetch tenant's data from the directory following this format:
-    ```
-    {SOURCE_PATH}/{CLIENT_ID}/in
-    ```
-
-    The processed data (data wrangling) needs to be stored in the directory following this format:
-    ```
-    {SOURCE_PATH}/{CLIENT_ID}/out
-    ```
-
-The way **clientstreamingestapp** and **clientbatchingestapp** handling data files shares a lot in common. However, there is one MAJOR difference.
-**streamingestmanager** will orchestrate **clientstreamingestapp** as a constant running instance ([Kubernetes Deployment](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)), instead of CronJob running with schedule like **clientbatchingestapp**. <br>
-
-Thus **clientstreamingestapp** need to watch the CHANGE in `{SOURCE_PATH}/{CLIENT_ID}/in` directory, using whatever technique that the chosen language capable of. (For example [watchdog](https://pypi.org/project/watchdog/) in Python is a powerful library for observing file changes).
-
-
-## 3. Develop & test
-The program that take data as input and perform data wrangling for streaming app is the exact same as batch ingestion app. Thus, the performance, error, log, and exception are similar. <br>
-
-In this case, using Pandas, we've perform `data wrangling` by dropping all rows with NULL values from the DataFrame.
-
-## 4. Report
-This can refer to answer 3.1 on how our platform can implement a mechanism for client app to report its metric, including components, flows and the mechanism for reporting. <br>
-
-As clientstreamingestapp is implemented by client, it's important that we must have a clear, structured format of report, or any logging produced. <br>
-A sample structured
+#### Sample output
 ```
 {
-  "start": "2024-03-15T11:00:00Z",
-  "end": "2024-03-15T12:00:00Z",
-  "average_time": 0.05,
-  "total_data_size": 2048,
-  "number_of_records": 600000
+  "window": {
+    "start": "2024-04-13T19:48:15.000+03:00",
+    "end": "2024-04-13T19:48:20.000+03:00"
+  },
+  "total_fare": 242,
+  "tips_fare": 46.6,
+  "total_trip_total": 313.6
 }
 ```
-## 5. Alert & Scalling
-Unfortunately there's not enough time for me to implement this. However, the way I would do this is to setup a cronjob to periodically fetch new report files from client, and base on the content, giving instruction to **streamingestmanager** to scale up/down our instance for **clientstreamingestapp**.
-It would be easier to leverage feature of cloud providers. For example with AWS, we can use Cloud Watch alert to trigger EC2 auto scalling group, notify admin or trigger an action in EKS.
-
-# Part 3 - Integration and Extension 
-## 1. Logging and Monitoring
-![Multi-tenancy Model](https://github.com/imminh123/realtime-data-ingestion-kafka-cassandra/blob/main/assets/logging.png?raw=true)
-
-In this architecture, there are several key components:
-1. Log exporter <br>
-  Depend on the source, we will have different log exporter. For client provided application, there can be a constrain of where to store the custom log file. For Kafka Connect, depend on the connector provider, there are different level of supporting monitoring. Kafka can also be monitor with JMX.
-  For example: we are using `DataStax Apache Kafka™ Connector` which has clear [documentation](https://docs.datastax.com/en/kafka/doc/kafka/kafkaConfigureLogging.html) on how to enabling the log exporter.
-
-2. Log collector <br>
-  This component is reponsible for collecting all the logs exported by all other component. Besides having custom logic for each service, we can rely on tools like [Prometheus](https://prometheus.io/) to set up scape task periodically, and alert manager.
-
-3. Analytic Engine & Analytic Dashboard<br>
-  This is another data ingestion pipeline that will take data from **Log collector** and distribute to other **analytic services**.
-  For example: Data can go to [Big Query](https://cloud.google.com/bigquery?hl=en) for BI task, and to monitoring tools like [New Relic](https://newrelic.com/) for overal health/performance monitoring, distributed tracing, etc.
 
 
-## 2. Multiple sinks
-The complexity depends on how much freedom, customization we as platform provider want to provide to tenants. <br>
-The current architecture relies on Kafka Connector and its ecosystem of plugin (Ex: [Confluent Hub](https://www.confluent.io/hub/)). Our platform can benefit from this ecosystem by integrating a variety of popular Kafka Connector Plugins, such as:
-- JDBC Source and Sink Connector
-- Google BigQuery Sink Connector
-- Amazon S3 Sink Connector
-- HDFS 2 Sink Connector
-- MySQL Source Connector
+### Accumulated number of trip, fare and average tips, total so far in a day (starting from 00:00 to 23:59)
+#### Logic
+Calculate accumulated and average amount of:
+1. trips (trips_total)
+2. fare (fare_total)
+3. average tips (tips_avg)
+4. average trip_total (trip_total_avg)
+> The result of this function provide a real-time view of business performance in a day, showing daily revenue, total number of trips, average tips and trip total fare can somehow reflect the service quality.
 
-Thus gave tenants more configuration options in **Service Agreement** for ingesting data to more than one sink.
+![Total metrics so far](https://questdb.io/img/blog/2024-01-15/nyc-cab-3.gif)
 
-## 3. Encryption
-Encryption is a tricky part, our platform can support File-level encryption and off load the key management to 3rd party cloud provider like AWS for key rotation and storage. <br>
+#### Configuration
+The data as input for this function need to be filtered based on the condition `00:00` > `event_timestamp` < `23:59`.
+The function aggregate data as soon as possible. Using `complete` output mode, new results will be added to previous one. The output will be write into another Kafka topic named `{tenant_app_name}_tripsTotalStream`. The data in this topic will be written to our Cassandra sink table `tripstotal` by a Kafka connect consumer.
 
-As the data goes into **coredms** need to have pre-defined structures, it's quite complicated if we relies on client to do the encryption task. This should be handled on our platform, and controlled only by flag in client configuration file. Data in **client-staging-input-directory** can stay encrypted but the trade-off will be performance and cost as we need more resources to handle encrypt/decrypt files.
+#### Code
+```
+# total so far
+today = current_date()
+specific_time = "00:00:00"  # Change this to your specific time
+specific_date_time = concat(today, lit(" "), lit(specific_time)).cast("timestamp")
+specific_time_data = info_df_fin.filter(col("event_timestamp") > specific_date_time) \
+                               .filter(col("event_timestamp") < date_add(today, 1))
 
-## 4. Data quality controlled
-There can be extra logic in our platform to handle data quality control by a pre-defined set of rules. Several criterias can include:
-- Completeness: make sure there's no incomplete records or missing values.
-- Validity: make sure data adhere to rules explicitly defined in **Service Agreement** and supported by our platform.
-- Timeliness: make sure ingested data is up-to-date and relevant to the business.
+trips_total = specific_time_data.select(count("*").alias("trips_total"), round(sum("fare"), 2).alias("fare_total"),
+                                 round(avg("tips"), 2).alias("tips_avg"), round(avg("trip_total"), 2).alias("trip_total_avg")).selectExpr(
+    "to_json(struct(*)) AS value")
+trips_total_stream = return_write_stream(trips_total, "tripsTotalStream", "complete", "trips_total_stream")
+```
 
-This mean an extra step in our pipeline as we should not rely on Kafka Connector to support this kind of data quality checking before ingestion. This logic/component will stay in between the client provided application and the ingestion manager.
+#### Sample output
+```
+{
+  "trips_total": 19747,
+  "fare_total": 350466.95,
+  "tips_avg": 3.13,
+  "trip_total_avg": 22.53
+}
+```
 
-## 5. Multiple clientbatchingestapp.
-As our platform relies on Kubernetes to orchestrate client task, which alreay come with features support allocating resources, and dealing with different workloads (auto scaling). Our job as a platform provider is to abstract these features into configurable settings to clients, and interprets it into Kubernetes configuration files.
+### Hot spot for pickup community area
+#### Logic
+Count the number of `pickup_community_area` in a period of time (last 1 minute) for every 30 seconds.
+> The result can be used to form a heatmap of popular community areas having high demand for taxi. 
 
+![Geomap Grafana](https://awsopensourceblog.s3.us-east-2.amazonaws.com/assets/alolitas_geomap_plugin_grafana/alolitas_geomap_plugin_grafana_f12.png)
+
+#### Configuration  
+The function aggregate data from a *sliding* window of `1 minute` for every `30 seconds` base on `event_timestamp`, with watermarking accepts delay up to `10 seconds`. The output will be written into another Kafka topic named `{tenant_app_name}_hotspotCommunityPickupWindowStream`. The data in this topic will be written to our Cassandra sink table `hotspotcommunitywindow` by a Kafka connect consumer.
+
+#### Code
+```
+# hot spot pickup community area
+hot_spot_community_pickup_window = info_df_fin.withWatermark("event_timestamp", "10 seconds").groupBy(
+    window("event_timestamp", "1 minute", "30 seconds"), "pickup_community_area").count().selectExpr(
+    "to_json(struct(*)) AS value")
+hot_spot_community_pickup_window_stream = return_write_stream(hot_spot_community_pickup_window,
+                                                              "hotspotCommunityPickupWindowStream", "append", "hot_spot_community_pickup_window_stream")
+```
+
+#### Sample output
+```
+{
+  "window": {
+    "start": "2024-04-13T19:48:00.000+03:00",
+    "end": "2024-04-13T19:49:00.000+03:00"
+  },
+  "pickup_community_area": 28,
+  "count": 7
+}
+```
+
+### Hot spot for pickup location
+#### Logic
+Count the number of `pickup_centroid_location` in a period of time (last 1 minute) for every 30 seconds.
+> The result can be used to form a heatmap of popular pickup location. 
+
+![Geomap Grafana](https://grafana.com/static/img/docs/geomap-panel/geomap-markers-8-1-0.png)
+
+#### Configuration  
+The function aggregate data from a *sliding* window of `1 minute` for every `30 seconds` base on `event_timestamp`, with watermarking accepts delay up to `10 seconds`. The output will be written into another Kafka topic named `{tenant_app_name}_hotspotWindowStream`. The data in this topic will be written to our Cassandra sink table `hotspotwindow` by a Kafka connect consumer.
+
+#### Code
+```
+# hot spot pickup location
+hot_spot_window = info_df_fin.withWatermark("event_timestamp", "10 seconds").groupBy(
+    window("event_timestamp", "1 minute", "30 seconds"), "pickup_centroid_location").count().selectExpr(
+    "to_json(struct(*)) AS value")
+hot_spot_window_stream = return_write_stream(hot_spot_window, "hotspotWindowStream", "append", "hot_spot_window_stream")
+```
+
+#### Sample output
+```
+{
+  "window": {
+    "start": "2024-04-13T19:48:00.000+03:00",
+    "end": "2024-04-13T19:49:00.000+03:00"
+  },
+  "pickup_centroid_location": "POINT (-87.6266589003 41.9075200747)",
+  "count": 1
+}
+```
+
+## 3. 

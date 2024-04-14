@@ -34,44 +34,72 @@ services:
       - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
       - KAFKA_CFG_SASL_MECHANISM_INTER_BROKER_PROTOCOL=PLAIN
 
+      - KAFKA_OPTS=-javaagent:/usr/share/jmx_exporter/jmx_prometheus_javaagent-0.20.0.jar=9200:/usr/share/jmx_exporter/kafka-broker.yml
+
       - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
       - BITNAMI_DEBUG=yes
     volumes:
+      - ./jmx-exporter:/usr/share/jmx_exporter/
       - kafka0_data:/tmp/bitnami/kafka
 
   kafka-connect:
-    image: 'kafka-connect-bdp:1.0.0'
+    image: 'minhnguyenaalto/kafka-connect-bdp:latest'
     container_name: 'kafka-connect'
     ports:
       - '8083:8083'
     environment:
       - CONNECT_BOOTSTRAP_SERVERS=kafka0:9092
       - CONNECT_REST_PORT=8083
-      - CONNECT_GROUP_ID=quickstart
-      - CONNECT_CONFIG_STORAGE_TOPIC=quickstart-config
-      - CONNECT_OFFSET_STORAGE_TOPIC=quickstart-offsets
-      - CONNECT_STATUS_STORAGE_TOPIC=quickstart-status
-      - CONNECT_KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - CONNECT_GROUP_ID=bdp-platform
+      - CONNECT_CONFIG_STORAGE_TOPIC=bdp-platform-config
+      - CONNECT_OFFSET_STORAGE_TOPIC=bdp-platform-offsets
+      - CONNECT_STATUS_STORAGE_TOPIC=bdp-platform-status
+      - CONNECT_KEY_CONVERTER=org.apache.kafka.connect.storage.StringConverter
       - CONNECT_VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
-      - CONNECT_INTERNAL_KEY_CONVERTER=org.apache.kafka.connect.json.JsonConverter
+      - CONNECT_INTERNAL_KEY_CONVERTER=org.apache.kafka.connect.storage.StringConverter
       - CONNECT_INTERNAL_VALUE_CONVERTER=org.apache.kafka.connect.json.JsonConverter
       - CONNECT_REST_ADVERTISED_HOST_NAME=localhost
       - CONNECT_PLUGIN_PATH=/usr/share/java,/usr/share/confluent-hub-components
+      - KAFKA_JMX_OPTS=-javaagent:/usr/share/jmx_exporter/jmx_prometheus_javaagent-0.20.0.jar=9200:/usr/share/jmx_exporter/kafka-connect.yml
+
     depends_on:
       - kafka0
     volumes:
       - ./ingestion/data:/data
-      - ./ingestion/connector/config/connect-log4j.properties:/etc/kafka/connect-log4j.properties
-      - ./ingestion/logs/kafka:/var/log/kafka
-      - ./ingestion/logs/cassandra:/var/log/cassandra
-
+      - './schemas:/app/schemas'
+      - ./jmx-exporter:/usr/share/jmx_exporter/
+      
     networks:
       - kafka-bdp
   
+  prometheus:
+    image: prom/prometheus:v2.47.2
+    ports:
+      - "9090:9090"
+    networks:
+      - kafka-bdp
+    volumes:
+      - ./prometheus:/etc/prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    networks:
+      - kafka-bdp
+    ports:
+      - "19093:9093"
+      
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    networks:
+      - kafka-bdp
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+
 volumes:
+  grafana-data:
   kafka0_data:
-    driver: local
-  kafka1_data:
-    driver: local
-  kafka2_data:
     driver: local
