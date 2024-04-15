@@ -15,6 +15,7 @@ import json
 import time
 import datetime
 
+
 '''
 A common, known function used for jsonifying a timestamp into a string
 '''
@@ -87,29 +88,52 @@ if __name__ == '__main__':
     we read data by chunk so we can handle a big sample data file
     '''
     input_data = pd.read_csv(INPUT_DATA_FILE, iterator=True, chunksize=chunksize, header=0, names=[
-        "trip_id",
-        "taxi_id",
-        "trip_start_timestamp",
-        "trip_end_timestamp",
-        "trip_seconds",
-        "trip_miles",
-        "pickup_census_tract",
-        "dropoff_census_tract",
-        "pickup_community_area",
-        "dropoff_community_area",
-        "fare",
-        "tips",
-        "tolls",
-        "extras",
-        "trip_total",
-        "payment_type",
-        "company",
-        "pickup_centroid_latitude",
-        "pickup_centroid_longitude",
-        "pickup_centroid_location",
-        "dropoff_centroid_latitude",
-        "dropoff_centroid_longitude",
-        "dropoff_centroid_location"
+        # "trip_id",
+        # "taxi_id",
+        # "trip_start_timestamp",
+        # "trip_end_timestamp",
+        # "trip_seconds",
+        # "trip_miles",
+        # "pickup_census_tract",
+        # "dropoff_census_tract",
+        # "pickup_community_area",
+        # "dropoff_community_area",
+        # "fare",
+        # "tips",
+        # "tolls",
+        # "extras",
+        # "trip_total",
+        # "payment_type",
+        # "company",
+        # "pickup_centroid_latitude",
+        # "pickup_centroid_longitude",
+        # "pickup_centroid_location",
+        # "dropoff_centroid_latitude",
+        # "dropoff_centroid_longitude",
+        # "dropoff_centroid_location"
+        "f_trip_id",
+        "f_taxi_id",
+        "f_trip_start_timestamp",
+        "f_trip_end_timestamp",
+        "f_trip_seconds",
+        "f_trip_miles",
+        "f_pickup_census_tract",
+        "f_dropoff_census_tract",
+        "f_pickup_community_area",
+        "f_dropoff_community_area",
+        "f_fare",
+        "f_tips",
+        "f_tolls",
+        "f_extras",
+        "f_trip_total",
+        "f_payment_type",
+        "f_company",
+        "f_pickup_centroid_latitude",
+        "f_pickup_centroid_longitude",
+        "f_pickup_centroid_location",
+        "f_dropoff_centroid_latitude",
+        "f_dropoff_centroid_longitude",
+        "f_dropoff_centroid_location"
     ])
 
     kafka_producer = Producer(kafka_conf)
@@ -118,6 +142,7 @@ if __name__ == '__main__':
         now process each chunk
         '''
         chunk = chunk_data.dropna()
+        chunk['event_timestamp'] = datetime.datetime.now()
         for index, row in chunk.iterrows():
             '''
             Assume that when some data is available, we send it to Kafka in JSON
