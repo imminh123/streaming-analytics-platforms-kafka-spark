@@ -1,2 +1,41 @@
-the content of this file should be the output of the log of your own git project for this assignment
-using git log command to export your git log
+commit 5950144107f7a97c5a36318e2e1e3da0732618d4 (HEAD -> main)
+Author: Minh Nguyen <minhco12@gmail.com>
+Date:   Tue Apr 16 12:03:39 2024 +0300
+
+    finalize
+
+commit 451815bf5b1a2f55a08fbc2b69ab45687d2c9591 (origin/main)
+Author: Minh Nguyen <minhco12@gmail.com>
+Date:   Tue Apr 16 02:01:02 2024 +0300
+
+    update report
+
+commit 2573a964852025ad8c146025b3a6fca833639d00
+Author: Minh Nguyen Thac <35805327+imminh123@users.noreply.github.com>
+Date:   Tue Apr 16 00:19:27 2024 +0300
+
+    Add files via upload
+
+commit 094e828621e15d896924516f893cdc2ea2d74e28
+Author: Minh Nguyen Thac <35805327+imminh123@users.noreply.github.com>
+Date:   Mon Apr 15 16:36:17 2024 +0300
+
+    Add files via upload
+
+commit 128d63b7cc0e677216e418e96795e00ec89de62a
+Author: Minh Nguyen Thac <35805327+imminh123@users.noreply.github.com>
+Date:   Mon Apr 15 14:31:10 2024 +0300
+
+    Add files via upload
+
+commit 00ab1727d4bdb898e09883ac7db6b086eb2a6ff1
+Author: Minh Nguyen <minhco12@gmail.com>
+Date:   Mon Apr 15 14:25:49 2024 +0300
+
+    add pictures
+
+commit 6bed0315a8a8f33e5afda6288689c503571039ef
+Author: Minh Nguyen <minhco12@gmail.com>
+Date:   Sun Apr 14 23:37:58 2024 +0300
+
+    initiating project

@@ -32,9 +32,9 @@ For our tenant usecase, since the analytic data does not rely on operations that
 ### Message Delivery Guarantees
 **Expected throughput**: Base on [previous analysis](https://toddwschneider.com/posts/chicago-taxi-data/) conducted, the number of taxi trips per day in Chicago averages around 50k to 100k during normal day and peaked at 150k on holiday occasions like St. Patrick's Day Parade. With our sample dataset, there are around 55k taxi trip records per day. *With the amount of events, we expected this fall into the comfort zone of our messaging system levering Kafka.*
 
-**The importance of a single message**: One taxi record is packed with useful informatin that directly contributes to the company's decision at the time on pricing, resource allocation and optimization. Hence, an appropriate semantic guarantee should prioritize *durability* and *consistency*.
+**The importance of a single message**: One taxi record is packed with useful informatin that directly contributes to the company's decision at the time on pricing, resource allocation and optimization. However, consider these data are used for analytical purpose, and the high volume of taxi trips per day, an appropriate semantic guarantee should prioritize *durability* and *availability*.
 
-With these considerations on tenant data, our messaging system should support the Message Delivery Guarantees level of [**Exactly Once** on both producer and consumer (utilize Kafka transactional delivery)](https://docs.confluent.io/kafka/design/delivery-semantics.html). With this, each message is delivered once and only once. Messages are never lost or read twice even if some part of the system fails.
+With these considerations on tenant data, our messaging system should support the Message Delivery Guarantees level of [**At least once**](https://docs.confluent.io/kafka/design/delivery-semantics.html) which already comes as default. With this, each message is guaranteed delivered at least one time. Messages are never lost, but they may be delivered more than once.
 
 ## 3. Time, Windows, Out-of-order, and Watermarks
 ### Event Time
@@ -416,8 +416,69 @@ The bottle neck from data source also reflects through the throughput of Spark w
 ### Scenario 1
 Emulating wrong data by removing data cleansing at ingestion. By removing `chunk_data.dropna()` function of pandas that remove all rows containing NULL value, we double the rows number with data having NULL value (from ~19.000 to ~54.000).
 ### Scenario 2
-Emulating wrong data by mapping wrong column name at ingestion. 
+Emulating wrong data by mapping wrong column name at ingestion. This makes all records in our dataset become wrong data.
+### Scenario 3
+Using a completely different dataset without `event_timestamp` that our Spark relies on to aggregate window data.
+
 ![](../assets/false_map_producer.png)
+
+**Observation**
+
+As our platform does not implement data schema verification at source (i.e. Kafka Schema Registry), thus ingesting wrong data does not cause any failure to our messaging system, for both publisher and consumer. As pictures below show that the throughput of Kafka and Spark remain unchange compare to our test with correct dataset.
+
+![False data kafka](../assets/false_info_kafka.png)
+![False data spark](../assets/false_info_spark.png)
+
+As a result, he false dataset of course makes our Spark stream analysis app failed to aggregate the correct result. On one hand, our Spark job can be consider "failed" as nothing was written into our 4 output Kafka topics.
+
+![False data spark](../assets/false_kafka_topics.png)
+
+On the other hand, our Spark jobs timeline still indicate all the tasks as `Succeeded`. 
+
+This is not true. After research, this `Succeeded` state should be considered like `Completed` state when Spark was able to start and end the session. This observation demands our platform to support other way to monitor the tenant Spark job rather than relying on Spark UI.
+
+![False data spark](../assets/false_spark_timeline.png)
+
+**Conclusion**
+
+Wrong data does not cause our platform decreasing performance nor failures of the whole system. There are 2 outcomes when wrong data are ingested:
+
+1. If spark analytic job actually succeed (not just completed), then the exceptions will happen at the last step of putting the result data to sink due to schema miss match.
+2. If spark analytic job failed to produce any result, then the platform consumer will have no data to work on.
+
+All of this exception can be handle at source ingestion with data pre-processing, cleansing and enforce schema validation with Kafka Schema Registry.
+
+
+## 5. Parallelism
+Our `tenantstreamapp` by default run minimum parallelism with 2 cores (master("local[2]")). Here's some of the test case with Spark parallelism setting.
+
+**Case 1**
+
+- Tenant A: maximum cores
+- Tenant B: maximum cores
+
+Result: as the local devices with 8 cores can accommodate maximum of 9 task running in parralel, if Tenant A run the process first, Tenant B will simple crash with exception from class `java.util.concurrent.ThreadPoolExecutor` indicate out of available threads.
+
+![Max cores spark](../assets/max_core_spark.png)
+
+**Case 2**
+- Tenant A: 3
+- Tenant B: 3
+
+Result: Very interesting result when setting the core numbers of each tenant to 3, which can accommodate ~8 task running in parralel. However, the processing speed went down drastically which overall affect the performance of both Tenant app. A reason for this is Spark is not meant to be used for processing small datasets, the overhead of chopping a job into tasks takes up too much of the limited computing capabilities.
+
+![Spark slow parralel](../assets/spark_slow_tenant_1.png)
+![Spark slow parralel](../assets/spark_slow_tenant_2.png)
+
+**Case 3**
+- Tenant A: 2
+- Tenant B: 2
+
+Surprisingly, even though the local machines is capable of running 8 cores, the most optimized number of cores for each Tenant app is 2, as we can clearly see the 10 times improvement for processing speed. This only true in our context where there's a bottle neck at data ingestion, hence limit the input for Spark. However, it worth notices that depend on the context and the surrounding environment, more cores do not always translate to more performance.
+
+![Spark optimized parralel](../assets/spark_optimized_paralel_1.png)
+![Spark optimized parralel](../assets/spark_optimized_paralel_2.png)
+
 
 
 # Part 3 - Extension
@@ -431,4 +492,50 @@ A service `ML-manager` will handle the scheduling task that will periodically se
 
 Once the ML inference service return results, it can go back to our messaging system, or queuing system. Tenant can decide to further process this results as real-time sources, visualize or simply save it for other operations. Tenant need to at least provide configuration on destination topics, schemas for data sink.
 
-## 2. 
+## 2. Batch analytics with workflow model
+As specify in Part 1.1, our platform also takes into account tenant's need of extracting insights from accumulated historical data to optimize business strategies and operations.
+
+### Workflow design for batch analytics
+
+![](../assets/spark_batch_workflow.png)
+
+**Our workflow has 7 main tasks, here's the breakdown on responsibilities and technologies choice:**
+
+### Technologies
+1. Workflow engine: we'll use Airflow for its popularity and easily extensible with custom operators.
+2. Batch analytic engine: Spark comes naturally since it's built for handling batch processing and our system has already using Spark for stream analytics.
+
+### Components
+1. Data extraction: custom component to extract data from `mysimbdp-coredms` with all relevant information for our next step.
+2. Data pre-processing: streaming analytics can come with noise, inconsistencies, missing values, etc. This custom component will perform any data cleansing operation, simple aggregation for the next step.
+3. Batch processing: our `tenantbatchapp` that perform analytics on provided data, several tasks can be scheduled to run in parralel with Spark.
+4. Storage: custom component to store the results of batch processing to storages (object, table, etc).
+5. Visualization (Optional): this component retrieve data from the storage and feed into tools like Grafana, Seaborn for visualization.
+6. BI (Optional): this component retrieve data from the storage and feed into BI tools like Tableau, Holistic, etc.
+7. ML (Optional): this component trigger ML inference on result data.
+
+
+## 3. Alert critical condition
+Here's the design for our system of alerting on critical condition trigger workflow (Airflow).
+
+As soon as our `tenantstreamapp` detects a critical condition, it can trigger a specified Airflow DAG using Airflow REST API along with necessary parameters.
+
+**Our Airflow DAG contains of 3 tasks:**
+
+Performing batch analysis --> Upload results to a cloud storage (i.e. AWS S3) --> Notify user (i.e. AWS SNS)
+
+![Alert critical condition](../assets/airflow.png)
+
+## 4. Schema Registry
+For managing schema evolution and validation within Kafka cluster, a recommend approach by Confluent is to use Kafka Schema Registry. Every schema is versioned, new version will get an incremented versin number, developer/owner can then easily compare the new schema with the previous versions to detect any changes. 
+
+For `tenantstreamapp`, Schema Registry brings the benefit of a centralized schema mangement which makes sure `tenantstreamapp` does not handle a wrong schema with `Schema Compatibility` check, also validating incoming data against the retrieved schema to ensure that it adheres to the expected structure. Additionally, it provides good practice to ensure new schemas are backward compatible with existing consumers.
+
+## 5. Exactly Once Delivery
+With the current implementation, we're not yet to achieve end-to-end exactly once delivery, mainly due to the choice of technologies/libraries as starting with version 0.11, Kafka has supported Exactly once semantic with transactional delivery.
+
+According to the [documentation](https://docs.confluent.io/kafka/design/delivery-semantics.html), in order to enable Exactly once support, we first need to adopt [Kafka Stream](https://kafka.apache.org/33/documentation/streams/core-concepts) and uses transactional producers and consumers to provide exactly-once delivery when transferring and processing data between Kafka topics.
+
+Another requirement that should makes this easier to implement is using Kafka Connect for automatic offset management, which our platform has already been using.
+
+Implementing Exactly once can be challenging, but thanks to Kafka's effort and with proper implementation, it is feasible.

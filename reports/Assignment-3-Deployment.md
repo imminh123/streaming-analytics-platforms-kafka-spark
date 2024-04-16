@@ -1,8 +1,6 @@
 # This is a deployment/installation guide
 
 ### Deploy Cassandra Cluster
-This file is reused from Assignment 1 <br>
-
 The docker compose located in `code/docker-compose-cassandra.yaml`
 ```
 docker-compose -f docker-compose-cassandra.yaml up -d
@@ -10,61 +8,31 @@ docker-compose -f docker-compose-cassandra.yaml up -d
 
 ### Setting up Cassandra Keyspace
 Run FastAPI server, update `data_constrain` variable if you want to use other data files.
-```
-python code/ingestion/main.py
-```
-
-### Build local image for Kafka Connect packed with connectors
-Dockerfile locates in `ingestion/connector/csv`
 
 ```
-docker build -t kafka-connect-bdp:1.0.0 . 
+python code/platform/main.py
 ```
 
-### Deploy Kafka & Kafka Connect Cluster
+### Deploy Kafka & Kafka Connect Cluster & Prometheus & Grafana
+
 ```
 docker-compose up -d
 ```
 
-Sending GET request to this url to verified we have 2 connectors installed , http://localhost:8083/connectors
+Sending GET request to this url to verified we have 1 connectors installed , http://localhost:8083/connectors
 
 ```
 [
-"cassandra-sink",
-"csv-spooldir-connector"
+"cassandra-sink"
 ]
 ```
 
-### Start Minikube (for local environment): `minikube start`
-
-By now, our system looks like this from the container point of view
-![system](https://github.com/imminh123/realtime-data-ingestion-kafka-cassandra/blob/main/assets/docker.jpg?raw=true)
-
+Grafana dashboard can be accessed at: http://localhost:3000
 
 ### Register Connector to Kafka Connect
-csv-spooldir-connector
-```
-curl --location 'http://localhost:8083/connectors' \
---header 'Content-Type: application/json' \
---data '{
-  "name": "csv-spooldir-connector",
-  "config": {
-    "tasks.max": "1",
-    "connector.class": "com.github.jcustenborder.kafka.connect.spooldir.SpoolDirCsvSourceConnector",
-    "input.path": "/data/input",
-    "input.file.pattern": ".*\\.csv$",
-    "schema.generation.enabled": "true",
-    "error.path": "/data/error",
-    "finished.path": "/data/finished",
-    "halt.on.error": "false",
-    "topic": "locations",
-    "csv.first.row.as.header": "true"
-  }
-}
-'
-```
 
-cassandra-sink
+**cassandra-sink**
+
 ```
 curl --location 'http://localhost:8083/connectors' \
 --header 'Content-Type: application/json' \
@@ -72,8 +40,12 @@ curl --location 'http://localhost:8083/connectors' \
     "name": "cassandra-sink",
     "config": {
         "connector.class": "com.datastax.oss.kafka.sink.CassandraSinkConnector",
-        "tasks.max": "1",
-        "topics": "locations",
+        "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+        "key.converter.schemas.enable": "false",
+        "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+        "value.converter.schemas.enable": "false",
+        "tasks.max": "4",
+        "topics": "tenantstreamapp_tripsTotalStream, tenantstreamapp_sumFareWindowStream, tenantstreamapp_hotspotCommunityPickupWindowStream, tenantstreamapp_hotspotWindowStream",
         "contactPoints": "cassandra1",
         "loadBalancing.localDc": "helsinki",
         "port": 9042,
@@ -86,61 +58,49 @@ curl --location 'http://localhost:8083/connectors' \
         "compression": "None",
 
         "auth.provider": "None",
+        "auth.username": "",
+        "auth.password": "",
+        "auth.gssapi.keyTab": "",
+        "auth.gssapi.principal": "",
+        "auth.gssapi.service": "dse",
+        "ssl.provider": "None",
+        "ssl.hostnameValidation": true,
+        "ssl.keystore.password": "",
+        "ssl.keystore.path": "",
+        "ssl.openssl.keyCertChain": "",
+        "ssl.openssl.privateKey": "",
+        "ssl.truststore.password": "",
+        "ssl.truststore.path": "",
+        "ssl.cipherSuites": "",
         
-        "topic.locations.mysimbdp_coredms.analytics.mapping": "marketplace=value.marketplace,customer_id=value.customer_id,review_id=value.review_id,product_id=value.product_id,product_parent=value.product_parent,product_title=value.product_title,product_category=value.product_category,star_rating=value.star_rating,helpful_votes=value.helpful_votes,total_votes=value.total_votes,vine=value.vine, verified_purchase=value.verified_purchase, review_headline=value.review_headline, review_body=value.review_body, review_date=value.review_date",
-        "topic.locations.mysimbdp_coredms.analytics.consistencyLevel": "LOCAL_ONE",
-        "topic.locations.mysimbdp_coredms.analytics.ttl": -1,
-        "topic.locations.mysimbdp_coredms.analytics.ttlTimeUnit" : "SECONDS",
-        "topic.locations.mysimbdp_coredms.analytics.timestampTimeUnit" : "MICROSECONDS",
-        "topic.locations.mysimbdp_coredms.analytics.nullToUnset": "true",
-        "topic.locations.mysimbdp_coredms.analytics.deletesEnabled": "true",
-        "topic.locations.codec.locale": "en_US",
-        "topic.locations.codec.timeZone": "UTC",
-        "topic.locations.codec.timestamp": "CQL_TIMESTAMP",
-        "topic.locations.codec.date": "ISO_LOCAL_DATE",
-        "topic.locations.codec.time": "ISO_LOCAL_TIME",
-        "topic.locations.codec.unit": "MILLISECONDS"
+         
+         "topic.tenantstreamapp_tripsTotalStream.mysimbdp_coredms.tripstotal.mapping": "id=now(),trips_total=value.trips_total,fare_total=value.fare_total,tips_avg=value.tips_avg,trip_total_avg=value.trip_total_avg",
+    
+        "topic.tenantstreamapp_sumFareWindowStream.mysimbdp_coredms.sumfarewindow.mapping": "id=now(),window=value.window,total_fare=value.total_fare,tips_fare=value.tips_fare,total_trip_total=value.total_trip_total",
+
+        "topic.tenantstreamapp_hotspotWindowStream.mysimbdp_coredms.hotspotwindow.mapping": "id=now(),pickup_centroid_location=value.pickup_centroid_location,count=value.count,window=value.window",
+
+        "topic.tenantstreamapp_hotspotCommunityPickupWindowStream.mysimbdp_coredms.hotspotcommunitywindow.mapping": "id=now(),pickup_community_area=value.pickup_community_area,count=value.count, window=value.window"
     }
 }
 '
 ```
 
-### Build local image for client ingest application 
-Dockerfile locates in `code/client-batch-ingestion/server/Dockerfile`
-
-1. Change docker daemon to use Minikube docker daemon
-`eval $(minikube docker-env)` 
-2. Build images 
+### Start tenantstreamapp Spark application
 ```
-docker build -t client-batch-ingestion:latest . 
+python code/tenantstreamapp/main.py
 ```
+Spark dashboard can be accessed at: http://localhost:4040
 
-We have both sample `clientbatchingestapp` and `clientstreamingestapp`, make changes to Dockerfile to choose one, default `clientbatchingestapp`
+If you want to run with multi tenants, I've also provide a different tenantstreamapp with different query names but work on the same dataset.
 ```
-# CMD ["python", "clientstreamingestapp.py"]
-CMD ["python", "clientbatchingestapp.py"]
+python code/tenantstreamapp/main_2.py
 ```
+Spark dashboard can be accessed at: http://localhost:4041
 
-### Mount Minikube volume to host system
-`minikube mount ${HOME}/code/ingestion/client-staging-input-directory:/data/client-staging-input-directory`
-
-### Applying clientbatchingesapp
-`kubectl apply -f code/bdp-k8s/cronjob.yaml `
-
-### (Or) Applying clientstreamingestapp
-`code/bdp-k8s/deployment.yaml`
-
-### Optional
-I have a simple client web interface to showcase the use of REST API to put data files into `client-staging-input-directory`. 
-The program is located in `code/client-batch-ingestion/client`.
+### Emulated data source
 ```
-npm run dev
+python kafka_producer.py  -i ../../data/Taxi_Trips__2024-__20240401_min.csv -c 10 -s 0 -t tenantstreamapp_ingestData
 ```
-
-![system](https://github.com/imminh123/realtime-data-ingestion-kafka-cassandra/blob/main/assets/sample_client_web_ui.jpg?raw=true)
-
-
-
-
 
 

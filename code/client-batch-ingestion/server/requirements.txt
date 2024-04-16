@@ -1,3 +1,0 @@
-confluent_kafka==2.3.0
-pandas==2.2.1
-watchdog==4.0.0
